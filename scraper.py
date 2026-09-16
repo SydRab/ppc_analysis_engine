@@ -10,14 +10,15 @@ CSV_FILE = "marketcall_data.csv"
 
 
 async def scrape_looker_studio():
-    """Scrapes dynamic table data from Looker Studio using Playwright."""
-    rows_data = []
+    """Automates Looker Studio UI export to download the raw map/table CSV file."""
+    temp_csv_path = None
     scrape_date = datetime.date.today().isoformat()
 
     async with async_playwright() as p:
-        # Launch headless browser
+        # Launch headless browser with download support enabled
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        context = await browser.new_context(accept_downloads=True)
+        page = await context.new_page()
 
         print("Navigating to Marketcall Looker Studio report...")
         await page.goto(URL, wait_until="domcontentloaded", timeout=90000)
@@ -26,41 +27,52 @@ async def scrape_looker_studio():
         await page.wait_for_selector("body", timeout=60000)
         await asyncio.sleep(10)
 
-        # Extract table rows dynamically rendered in the DOM
-        # Looker Studio renders interactive tables using standard ARIA roles
-        rows = await page.query_selector_all(
-            "div[role='table'] div[role='row'], div.tableBody div.row"
-        )
+        try:
+            # 1. Hover over the map visual header to reveal the 3-dots action menu
+            print("Locating map visualization...")
+            map_element = page.locator("div.ng-star-inserted").filter(
+                has_text="Average Bid by Zip Code"
+            ).first
+            await map_element.hover()
+            await asyncio.sleep(1)
 
-        if rows:
-            print(f"Found {len(rows)} table rows.")
-            for row in rows:
-                cells = await row.query_selector_all(
-                    "[role='cell'], [role='gridcell'], .tableCell"
-                )
-                cell_values = [
-                    (await cell.inner_text()).strip().replace("\n", " ")
-                    for cell in cells
-                ]
-                if cell_values and any(cell_values):
-                    rows_data.append([scrape_date] + cell_values)
-        else:
-            print("Standard table elements not detected. Extracting grid text fallback...")
-            # Fallback: Scrape visual text blocks if rendered inside SVG/Canvas wrappers
-            extracted_text = await page.evaluate(
-                """() => {
-                const nodes = Array.from(document.querySelectorAll('.cell, [role="cell"], .ng-star-inserted'));
-                return nodes.map(n => n.innerText.trim()).filter(t => t.length > 0);
-            }"""
-            )
+            # 2. Click the 3-dots options menu button
+            print("Opening context menu...")
+            more_options_btn = page.locator(
+                "button[aria-label='More options'], .action-button, [data-ng-click*='showExport']"
+            ).first
+            await more_options_btn.click()
+            await asyncio.sleep(1)
 
-            # Group extracted sequential items if extracted flat
-            if extracted_text:
-                print(f"Extracted {len(extracted_text)} total text tokens.")
-                # Save raw structured snapshot if strict rows aren't separated
-                rows_data.append([scrape_date, " | ".join(extracted_text)])
+            # 3. Trigger export flow and capture downloaded CSV file
+            print("Triggering Export option...")
+            async with page.expect_download(timeout=60000) as download_info:
+                # Click 'Export' in the context dropdown menu
+                await page.get_by_text("Export").click()
+                await asyncio.sleep(1)
+
+                # Click the final 'Export' confirmation button inside the modal dialog
+                modal_export_btn = page.locator(
+                    "button:has-text('Export'), .mat-button:has-text('EXPORT')"
+                ).last
+                await modal_export_btn.click()
+
+            download = await download_info.value
+            temp_csv_path = await download.path()
+            print("Download captured successfully.")
+
+        except Exception as e:
+            print(f"Failed to download export file: {e}")
 
         await browser.close()
+
+    # Read the downloaded CSV content and format rows for deduplication
+    rows_data = []
+    if temp_csv_path and os.path.exists(temp_csv_path):
+        downloaded_df = pd.read_csv(temp_csv_path)
+        # Convert dataframe rows to raw lists with Scraped_Date prepended
+        for row in downloaded_df.values.tolist():
+            rows_data.append([scrape_date] + [str(val) for val in row])
 
     return rows_data
 
