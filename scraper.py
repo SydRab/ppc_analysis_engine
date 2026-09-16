@@ -17,7 +17,7 @@ async def scrape_looker_studio():
     async with async_playwright() as p:
         # Launch headless browser
         browser = await p.chromium.launch(headless=True)
-page = await browser.new_page()
+        page = await browser.new_page()
 
     print("Navigating to Marketcall Looker Studio report...")
     await page.goto(URL, wait_until="domcontentloaded", timeout=90000)
