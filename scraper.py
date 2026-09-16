@@ -20,8 +20,13 @@ async def scrape_looker_studio():
         page = await browser.new_page()
 
         print("Navigating to Marketcall Looker Studio report...")
-        await page.goto(URL, wait_until="networkidle", timeout=90000)
 
+        # Change wait_until to domcontentloaded so navigation doesn't block on continuous background network calls
+        await page.goto(URL, wait_until="domcontentloaded", timeout=90000)
+        
+        # Wait for the actual Looker Studio canvas element to render
+        await page.wait_for_selector("div.ggr-canvas", timeout=60000)
+        
         # Give Looker Studio JS visuals time to completely render canvas/tables
         await page.wait_for_timeout(12000)
 
