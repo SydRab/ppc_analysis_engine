@@ -14,27 +14,28 @@ async def test_export_flow():
         )
         page = await context.new_page()
 
-        print("\n--- DIAGNOSTIC TEST: Target Export Data Menu Item ---")
+        print("\n--- DIAGNOSTIC TEST: Direct Page Menu Trigger ---")
         try:
             await page.goto(TEST_URL, wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(10)
 
-            # 1. Focus the report iframe context
-            frame = page.frame_locator("iframe").first if len(page.frames) > 1 else page
-
-            # 2. Right-click or move mouse over component container to reveal action header
-            chart_container = frame.locator("ggr-geo-chart, .component-container").first
-            await chart_container.click(button="right", force=True)
+            # 1. Target map visual directly on the main page (No iframe wrapper)
+            map_visual = page.locator("ggr-geo-chart, .component-container, canvas, svg").first
+            
+            # 2. Move mouse & right-click map visual to mount the overlay menu
+            await map_visual.hover(force=True)
+            await asyncio.sleep(1)
+            await map_visual.click(button="right", force=True)
             await asyncio.sleep(1.5)
 
             # 3. Intercept download stream
             async with page.expect_download(timeout=30000) as download_info:
-                # Target exact text "Export data"
-                export_item = page.locator("body, .cdk-overlay-container").get_by_text("Export data", exact=True).first
+                # Target exact text "Export data" overlay element
+                export_item = page.locator("body, .cdk-overlay-container, mat-menu").get_by_text("Export data", exact=True).first
                 await export_item.click(force=True)
                 await asyncio.sleep(1.5)
 
-                # Target confirmation dialog EXPORT button
+                # Target modal dialog EXPORT button
                 confirm_btn = page.locator("mat-dialog-container button").filter(has_text="EXPORT").last
                 await confirm_btn.click(force=True)
 
@@ -43,6 +44,7 @@ async def test_export_flow():
 
             df = pd.read_csv(temp_path)
             print(f"[✓] SUCCESS: Downloaded CSV with {len(df)} rows!")
+            print("Sample Output:")
             print(df.head(3))
 
         except Exception as e:
