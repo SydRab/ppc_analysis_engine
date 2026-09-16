@@ -78,22 +78,19 @@ def save_and_deduplicate(new_data):
 
     new_df = pd.DataFrame(new_data, columns=column_names[:max_cols])
 
-    if os.path.exists(CSV_FILE):
+    if os.path.exists(CSV_FILE) and os.path.getsize(CSV_FILE) > 0:
         print(f"Loading existing dataset from {CSV_FILE}...")
-        existing_df = pd.read_csv(CSV_FILE)
-
-        # Combine datasets
-        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-
-        # Deduplicate based on all columns except 'Scraped_Date'
-        data_columns = [c for c in combined_df.columns if c != "Scraped_Date"]
-        deduped_df = combined_df.drop_duplicates(
-            subset=data_columns, keep="first"
-        )
+        try:
+            existing_df = pd.read_csv(CSV_FILE)
+            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+            data_columns = [c for c in combined_df.columns if c != "Scraped_Date"]
+            deduped_df = combined_df.drop_duplicates(subset=data_columns, keep="first")
+        except pd.errors.EmptyDataError:
+            deduped_df = new_df
     else:
-        print("No existing CSV found. Creating new file...")
+        print("No existing or valid CSV found. Creating new dataset...")
         deduped_df = new_df
-
+        
     deduped_df.to_csv(CSV_FILE, index=False)
     print(f"Dataset updated. Total records saved: {len(deduped_df)}")
 
