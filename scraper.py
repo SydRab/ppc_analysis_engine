@@ -28,27 +28,29 @@ async def scrape_category(page, category_name, url):
     scrape_date = datetime.date.today().isoformat()
     print(f"\n[+] Processing: {category_name}")
 
-    await page.goto(url, wait_until="domcontentloaded", timeout=90000)
-    await page.wait_for_selector("body", timeout=60000)
-    await asyncio.sleep(12)
+    await page.goto(url, wait_until="networkidle", timeout=90000)
+    await asyncio.sleep(10)
 
-    # 1. Hover over the map visual container to reveal the 3-dots button
-    chart_widget = page.locator("ggr-geo-chart, .component-container, canvas").first
-    await chart_widget.hover(force=True)
+    # 1. Target the embedded iframe context
+    frame = page.frame_locator("iframe").first if len(page.frames) > 1 else page
+
+    # 2. Hover over map container inside the iframe context
+    map_element = frame.locator("ggr-geo-chart, .component-container, canvas, svg").first
+    await map_element.hover(force=True)
     await asyncio.sleep(2)
 
-    # 2. Click the 3-dots options menu button
-    more_options_btn = page.locator("button[aria-label='More options'], [aria-label='More options']").first
+    # 3. Click the 3-dots action menu inside the iframe context
+    more_options_btn = frame.locator(
+        "button[aria-label='More options'], [aria-label='More options'], .action-button"
+    ).first
     await more_options_btn.click(force=True)
     await asyncio.sleep(1.5)
 
-    # 3. Capture file download stream
+    # 4. Trigger download and confirm modal
     async with page.expect_download(timeout=60000) as download_info:
-        # Click "Export data" inside the overlay menu
-        await page.locator(".cdk-overlay-container, .mat-menu-content").get_by_text("Export data").click()
+        await page.locator(".cdk-overlay-container, .mat-menu-content").get_by_text("Export data").first.click()
         await asyncio.sleep(1.5)
 
-        # Click the blue EXPORT button in the popup modal (CSV is selected by default)
         modal_export_btn = page.locator("mat-dialog-container button").filter(has_text="EXPORT").last
         await modal_export_btn.click()
 
@@ -59,7 +61,7 @@ async def scrape_category(page, category_name, url):
     df["Scraped_Date"] = scrape_date
     df["Offer_Category"] = category_name
 
-    print(f"    Saved {len(df)} rows for {category_name}.")
+    print(f"    Successfully extracted {len(df)} rows for {category_name}.")
     return df
 
 async def main():
@@ -100,7 +102,7 @@ def save_and_deduplicate(new_df):
         deduped_df = new_df
 
     deduped_df.to_csv(CSV_FILE, index=False)
-    print(f"\n[✓] Updated {CSV_FILE} with {len(deduped_df)} total records.")
+    print(f"\n[✓] Master dataset updated: {len(deduped_df)} total records saved in {CSV_FILE}.")
 
 if __name__ == "__main__":
     asyncio.run(main())
