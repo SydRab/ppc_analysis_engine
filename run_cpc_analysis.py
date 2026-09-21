@@ -92,7 +92,9 @@ def fetch_zip_level_gads_data(gads_client, customer_id, criteria_id, seed_keywor
     
     request = gads_client.get_type("GenerateKeywordIdeasRequest")
     request.customer_id = customer_id
-    request.language = gads_client.get_service("LanguageConstantService").language_constant_path("1000") # English
+    
+    # Direct string resource path (Fixes: LanguageConstantService deprecation error in v25)
+    request.language = "languageConstants/1000"  # English
     
     target_geo = criteria_id if criteria_id else "2840"
     request.geo_target_constants.append(geo_service.geo_target_constant_path(target_geo))
