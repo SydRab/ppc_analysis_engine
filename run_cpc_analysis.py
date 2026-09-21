@@ -53,13 +53,13 @@ def get_gads_client():
 def build_zip_to_criteria_id_map(gads_client, customer_id, target_zips):
     """
     Uses Google Ads API GeoTargetConstantService to dynamically look up 
-    Criteria IDs for 5-digit US Postal Codes with safe batching & error recovery.
+    Criteria IDs for 5-digit US Postal Codes, strictly respecting Google's 25-item batch limit.
     """
     print(f"[+] Looking up Criteria IDs for {len(target_zips)} ZIP codes via Google Ads API...")
     gtc_service = gads_client.get_service("GeoTargetConstantService")
     
     mapping = {}
-    batch_size = 50  # Optimized batch size for location lookup
+    batch_size = 25  # STRICT GOOGLE LIMIT: Maximum 25 location names per request
     target_zips_padded = [str(z).zfill(5) for z in target_zips]
     
     for i in range(0, len(target_zips_padded), batch_size):
@@ -81,7 +81,7 @@ def build_zip_to_criteria_id_map(gads_client, customer_id, target_zips):
                         cid = gtc.resource_name.split("/")[-1]
                         mapping[gtc.name] = cid
                 success = True
-                time.sleep(0.5)  # Brief pause between geo batches
+                time.sleep(0.4)  # Brief pause between geo batches
             except Exception as e:
                 retries -= 1
                 print(f"    [!] Warning: Geo batch lookup failed ({e}), retries left: {retries}")
