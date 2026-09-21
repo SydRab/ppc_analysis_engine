@@ -3,8 +3,11 @@ import datetime
 import os
 import pandas as pd
 from playwright.async_api import async_playwright
+from google.cloud import bigquery
+from google.oauth2 import service_account
 
 CSV_FILE = "marketcall_data.csv"
+KEY_PATH = "gcp_key.json"
 
 CATEGORY_URLS = {
     "Pest Control": "https://datastudio.google.com/embed/u/0/reporting/622ebab9-9ee2-45b6-9831-bbf53e3395f9/page/uruCE?params=%7B%22df12%22:%22include%25EE%2580%25800%25EE%2580%2580IN%25EE%2580%2580Pest%2520Control%22%7D",
@@ -88,6 +91,7 @@ async def main():
     if all_dfs:
         combined_df = pd.concat(all_dfs, ignore_index=True)
         save_and_deduplicate(combined_df)
+        upload_to_bigquery(combined_df)
 
 def save_and_deduplicate(new_df):
     if os.path.exists(CSV_FILE) and os.path.getsize(CSV_FILE) > 0:
@@ -103,6 +107,30 @@ def save_and_deduplicate(new_df):
 
     deduped_df.to_csv(CSV_FILE, index=False)
     print(f"\n[✓] Master dataset updated: {len(deduped_df)} total records saved in {CSV_FILE}.")
+
+def upload_to_bigquery(new_df):
+    if not os.path.exists(KEY_PATH):
+        print("\n[!] GCP key file (gcp_key.json) not found. Skipping BigQuery upload.")
+        return
+
+    try:
+        credentials = service_account.Credentials.from_service_account_file(KEY_PATH)
+        client = bigquery.Client(credentials=credentials, project=credentials.project_id)
+
+        # Target BigQuery table
+        table_id = f"{credentials.project_id}.github_ppc_marketcall_db.daily_scraped_data"
+
+        job_config = bigquery.LoadJobConfig(
+            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+            autodetect=True,
+            column_name_character_map="V2"  # Handles special characters in headers
+        )
+
+        job = client.load_table_from_dataframe(new_df, table_id, job_config=job_config)
+        job.result()  # Wait for upload completion
+        print(f"[✓] Successfully uploaded {len(new_df)} new rows to BigQuery table: {table_id}")
+    except Exception as e:
+        print(f"[!] BigQuery upload failed: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
