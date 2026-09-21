@@ -2,8 +2,13 @@ name: Daily CPC Analysis & BigQuery Sync
 
 on:
   schedule:
-    - cron: '01 0 * * *' # Runs daily at 01:00 UTC (60 mins after the scraper)
+    - cron: '30 1 * * *' # Scheduled daily run
   workflow_dispatch:
+    inputs:
+      target_date:
+        description: 'Target Date (YYYY-MM-DD) or "ALL" for past dates'
+        required: false
+        default: 'ALL'
 
 jobs:
   analyze-and-evaluate:
@@ -30,5 +35,23 @@ jobs:
           GADS_CLIENT_SECRET: ${{ secrets.GADS_CLIENT_SECRET }}
           GADS_REFRESH_TOKEN: ${{ secrets.GADS_REFRESH_TOKEN }}
           GADS_LOGIN_CUSTOMER_ID: ${{ secrets.GADS_LOGIN_CUSTOMER_ID }}
+          TARGET_DATE_INPUT: ${{ github.event.inputs.target_date }}
         run: |
-          python run_cpc_analysis.py
+          python -c "
+          import os
+          from run_cpc_analysis import process_daily_cpc_analysis
+
+          target = os.environ.get('TARGET_DATE_INPUT', '')
+
+          if target == 'ALL' or not target:
+              # Pull all distinct Scraped_Date partitions directly from BigQuery
+              from google.cloud import bigquery
+              client = process_daily_cpc_analysis.__globals__['get_bq_client']()
+              query = 'SELECT DISTINCT Scraped_Date FROM \`ppc-scraper-analysis.github_ppc_marketcall_db.daily_scraped_data\` ORDER BY Scraped_Date ASC'
+              dates = [row.Scraped_Date.isoformat() for row in client.query(query).result()]
+              print(f'[+] Found {len(dates)} date partitions in BigQuery: {dates}')
+              for d in dates:
+                  process_daily_cpc_analysis(target_date=d)
+          else:
+              process_daily_cpc_analysis(target_date=target)
+          "
