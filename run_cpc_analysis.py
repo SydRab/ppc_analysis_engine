@@ -49,27 +49,38 @@ def get_gads_client():
     }
     return GoogleAdsClient.load_from_dict(credentials)
 
-def build_zip_to_criteria_id_map(target_zips):
+def build_zip_to_criteria_id_map(gads_client, customer_id, target_zips):
     """
-    Downloads Google's official Geotargeting table to map US 5-digit ZIPs to Criteria IDs.
+    Uses Google Ads API GeoTargetConstantService to dynamically look up 
+    Criteria IDs for 5-digit US Postal Codes.
     """
-    print("[+] Downloading Google Ads Geo Targets table to map ZIP codes to Criteria IDs...")
-    try:
-        url = "https://developers.google.com/google-ads/api/data/geotargets"
-        # Download and parse official Google Geo Targets CSV
-        geo_df = pd.read_csv("https://developers.google.com/ad-manager/api/data/geotargets")
-        us_zips = geo_df[(geo_df["Country Code"] == "US") & (geo_df["Target Type"] == "Postal Code")].copy()
-        us_zips["zip_code"] = us_zips["Name"].astype(str).str.zfill(5)
-        
-        target_zips_padded = [str(z).zfill(5) for z in target_zips]
-        filtered = us_zips[us_zips["zip_code"].isin(target_zips_padded)]
-        
-        mapping = dict(zip(filtered["zip_code"], filtered["Criteria ID"].astype(str)))
-        print(f"[✓] Mapped {len(mapping)} / {len(target_zips)} unique ZIP codes to Google Criteria IDs.")
-        return mapping
-    except Exception as e:
-        print(f"[!] Warning: Could not parse Google Geo Targets dataset ({e}). Defaulting to US Nationwide (2840).")
-        return {}
+    print(f"[+] Looking up Criteria IDs for {len(target_zips)} ZIP codes via Google Ads API...")
+    gtc_service = gads_client.get_service("GeoTargetConstantService")
+    
+    mapping = {}
+    batch_size = 25
+    target_zips_padded = [str(z).zfill(5) for z in target_zips]
+    
+    for i in range(0, len(target_zips_padded), batch_size):
+        batch = target_zips_padded[i:i + batch_size]
+        try:
+            request = gads_client.get_type("SuggestGeoTargetConstantsRequest")
+            request.locale = "en"
+            request.country_code = "US"
+            request.location_names.names.extend(batch)
+            
+            response = gtc_service.suggest_geo_target_constants(request=request)
+            for suggestion in response.geo_target_constant_suggestions:
+                gtc = suggestion.geo_target_constant
+                if gtc.target_type == "Postal Code" and gtc.country_code == "US":
+                    # Extract numeric ID from 'geoTargetConstants/1014221'
+                    cid = gtc.resource_name.split("/")[-1]
+                    mapping[gtc.name] = cid
+        except Exception as e:
+            print(f"    [!] Warning: Failed batch geo lookup ({e})")
+            
+    print(f"[✓] Successfully mapped {len(mapping)} / {len(target_zips)} unique ZIP codes to Google Criteria IDs.")
+    return mapping
 
 def fetch_zip_level_gads_data(gads_client, customer_id, criteria_id, seed_keywords):
     """
@@ -154,13 +165,13 @@ def process_daily_cpc_analysis(target_date=None):
     print(f"[+] Total raw rows: {len(df)} | Qualified Top 5% ZIP targets: {len(top_df)}")
 
     # --- 2. MAP ZIP TO GOOGLE CRITERIA IDS ---
-    zip_map = build_zip_to_criteria_id_map(top_df["zip_code"].unique())
-    top_df["geo_criteria_id"] = top_df["zip_code"].map(zip_map).fillna("2840")
-
-    # --- 3. FETCH ZIP-LEVEL GOOGLE ADS API METRICS ---
     gads_client = get_gads_client()
     customer_id = os.environ.get("GADS_LOGIN_CUSTOMER_ID")
 
+    zip_map = build_zip_to_criteria_id_map(gads_client, customer_id, top_df["zip_code"].unique())
+    top_df["geo_criteria_id"] = top_df["zip_code"].map(zip_map).fillna("2840")
+
+    # --- 3. FETCH ZIP-LEVEL GOOGLE ADS API METRICS ---
     api_results = []
     print(f"[+] Fetching hyper-local Google Ads metrics per ZIP code...")
     
