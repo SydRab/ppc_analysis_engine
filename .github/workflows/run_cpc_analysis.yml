@@ -1,0 +1,34 @@
+name: Daily CPC Analysis & BigQuery Sync
+
+on:
+  schedule:
+    - cron: '01 0 * * *' # Runs daily at 01:00 UTC (60 mins after the scraper)
+  workflow_dispatch:
+
+jobs:
+  analyze-and-evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-ads pandas numpy google-cloud-bigquery db-dtypes
+
+      - name: Execute CPC Analysis Pipeline
+        env:
+          GCP_PROJECT_ID: "ppc-scraper-analysis"
+          GCP_SA_KEY_JSON: ${{ secrets.GCP_SA_BQ_KEY }}
+          GADS_CLIENT_ID: ${{ secrets.GADS_CLIENT_ID }}
+          GADS_CLIENT_SECRET: ${{ secrets.GADS_CLIENT_SECRET }}
+          GADS_REFRESH_TOKEN: ${{ secrets.GADS_REFRESH_TOKEN }}
+          GADS_LOGIN_CUSTOMER_ID: ${{ secrets.GADS_LOGIN_CUSTOMER_ID }}
+        run: |
+          python run_cpc_analysis.py
