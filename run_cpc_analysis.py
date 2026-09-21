@@ -7,13 +7,13 @@ from google.cloud import bigquery
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
 
-# BigQuery Table Definitions
+# BigQuery Definitions
 GCP_PROJECT = os.environ.get("GCP_PROJECT_ID", "ppc-scraper-analysis")
 BQ_DATASET = "github_ppc_marketcall_db"
 RAW_TABLE = f"{GCP_PROJECT}.{BQ_DATASET}.daily_scraped_data"
 EVALUATED_TABLE = f"{GCP_PROJECT}.{BQ_DATASET}.evaluated_top_5pc_zips"
 
-# Default seed keywords per category for Google Ads Keyword Planner API
+# Seed keywords per offer category for Google Ads Keyword Planner API
 CATEGORY_SEED_KEYWORDS = {
     "Pest Control": ["pest control near me", "exterminator service", "termite control"],
     "Roofing": ["roof repair near me", "roofing contractor", "roof replacement"],
@@ -32,7 +32,6 @@ CATEGORY_SEED_KEYWORDS = {
 }
 
 def get_bq_client():
-    """Initializes BigQuery client using GCP_SA_KEY_JSON secret from GitHub Actions."""
     sa_json = os.environ.get("GCP_SA_KEY_JSON")
     if sa_json:
         info = json.loads(sa_json)
@@ -40,7 +39,6 @@ def get_bq_client():
     return bigquery.Client(project=GCP_PROJECT)
 
 def get_gads_client():
-    """Initializes Google Ads API client using environment secrets."""
     credentials = {
         "developer_token": "DEVELOPER_TOKEN_NOT_REQUIRED",
         "client_id": os.environ.get("GADS_CLIENT_ID"),
@@ -51,23 +49,49 @@ def get_gads_client():
     }
     return GoogleAdsClient.load_from_dict(credentials)
 
-def fetch_cpc_for_category(gads_client, customer_id, seed_keywords):
+def build_zip_to_criteria_id_map(target_zips):
     """
-    Queries Google Ads API KeywordPlanIdeaService to retrieve Low, Mid, and High 
-    top-of-page CPC bid estimates (converted from micros to USD).
+    Downloads Google's official Geotargeting table to map US 5-digit ZIPs to Criteria IDs.
+    """
+    print("[+] Downloading Google Ads Geo Targets table to map ZIP codes to Criteria IDs...")
+    try:
+        url = "https://developers.google.com/google-ads/api/data/geotargets"
+        # Download and parse official Google Geo Targets CSV
+        geo_df = pd.read_csv("https://developers.google.com/ad-manager/api/data/geotargets")
+        us_zips = geo_df[(geo_df["Country Code"] == "US") & (geo_df["Target Type"] == "Postal Code")].copy()
+        us_zips["zip_code"] = us_zips["Name"].astype(str).str.zfill(5)
+        
+        target_zips_padded = [str(z).zfill(5) for z in target_zips]
+        filtered = us_zips[us_zips["zip_code"].isin(target_zips_padded)]
+        
+        mapping = dict(zip(filtered["zip_code"], filtered["Criteria ID"].astype(str)))
+        print(f"[✓] Mapped {len(mapping)} / {len(target_zips)} unique ZIP codes to Google Criteria IDs.")
+        return mapping
+    except Exception as e:
+        print(f"[!] Warning: Could not parse Google Geo Targets dataset ({e}). Defaulting to US Nationwide (2840).")
+        return {}
+
+def fetch_zip_level_gads_data(gads_client, customer_id, criteria_id, seed_keywords):
+    """
+    Queries KeywordPlanIdeaService targeted specifically at a ZIP Criteria ID.
+    Returns Low, Mid, High CPCs, Monthly Search Volume, and Competition Index.
     """
     geo_service = gads_client.get_service("GeoTargetConstantService")
     gtc_service = gads_client.get_service("KeywordPlanIdeaService")
     
     request = gads_client.get_type("GenerateKeywordIdeasRequest")
     request.customer_id = customer_id
-    request.language = gads_client.get_service("LanguageConstantService").language_constant_path("1000")
-    request.geo_target_constants.append(geo_service.geo_target_constant_path("2840")) # United States
+    request.language = gads_client.get_service("LanguageConstantService").language_constant_path("1000") # English
+    
+    target_geo = criteria_id if criteria_id else "2840"
+    request.geo_target_constants.append(geo_service.geo_target_constant_path(target_geo))
     request.include_adult_keywords = False
     request.keyword_plan_network = gads_client.get_type("KeywordPlanNetworkEnum").KeywordPlanNetwork.GOOGLE_SEARCH
     request.keyword_seed.keywords.extend(seed_keywords)
 
     low_bids, high_bids = [], []
+    monthly_searches, comp_indexes, comp_levels = [], [], []
+
     try:
         response = gtc_service.generate_keyword_ideas(request=request)
         for result in response:
@@ -76,101 +100,132 @@ def fetch_cpc_for_category(gads_client, customer_id, seed_keywords):
                 low_bids.append(m.low_top_of_page_bid_micros / 1_000_000)
             if m.high_top_of_page_bid_micros:
                 high_bids.append(m.high_top_of_page_bid_micros / 1_000_000)
+            if m.avg_monthly_searches:
+                monthly_searches.append(m.avg_monthly_searches)
+            if m.competition_index:
+                comp_indexes.append(m.competition_index)
+            if m.competition:
+                comp_levels.append(m.competition.name)
     except GoogleAdsException as ex:
-        print(f"    [!] Google Ads API Exception: {ex}")
+        print(f"    [!] API Exception for Criteria ID {criteria_id}: {ex}")
 
     avg_low = float(np.mean(low_bids)) if low_bids else 0.0
     avg_high = float(np.mean(high_bids)) if high_bids else 0.0
     avg_mid = (avg_low + avg_high) / 2.0
-    return round(avg_low, 2), round(avg_mid, 2), round(avg_high, 2)
+    total_volume = int(np.sum(monthly_searches)) if monthly_searches else 0
+    avg_comp_idx = int(np.mean(comp_indexes)) if comp_indexes else 0
+    top_comp_level = comp_levels[0] if comp_levels else "UNKNOWN"
+
+    return {
+        "api_cpc_low": round(avg_low, 2),
+        "api_cpc_mid": round(avg_mid, 2),
+        "api_cpc_high": round(avg_high, 2),
+        "avg_monthly_searches": total_volume,
+        "competition_index": avg_comp_idx,
+        "competition_level": top_comp_level
+    }
 
 def process_daily_cpc_analysis(target_date=None):
-    """Primary pipeline orchestration function."""
     bq_client = get_bq_client()
     if target_date is None:
         target_date = date.today().isoformat()
 
-    print(f"\n[+] Querying BigQuery partition: Scraped_Date = '{target_date}'...")
+    print(f"\n[+] Processing Scraped_Date = '{target_date}' from BigQuery...")
     query = f"SELECT * FROM `{RAW_TABLE}` WHERE Scraped_Date = '{target_date}'"
     df = bq_client.query(query).to_dataframe()
 
     if df.empty:
-        print(f"[!] No records found in {RAW_TABLE} for date {target_date}.")
+        print(f"[!] No records found for date {target_date}.")
         return
 
-    # Standardize column naming
     df.columns = [c.replace(" ", "_").replace(",", "_") for c in df.columns]
 
-    # --- STEP 1: DUAL-DIMENSION TOP 5% FILTERING ---
-    # 1A. Top 5% Payout Quantile (per Offer_Category)
+    # --- 1. DUAL TOP 5% QUANTILE FILTERING ---
     df["payout_quantile_95"] = df.groupby("Offer_Category")["Average_Bid"].transform(lambda x: x.quantile(0.95))
     df["is_top_5_percent"] = df["Average_Bid"] >= df["payout_quantile_95"]
 
-    # 1B. Top 5% Activity Score (Average_Bid * Number_of_bids) -> Updated to 0.95 Quantile
     df["activity_score"] = df["Average_Bid"] * df["Number_of_bids"]
     df["activity_quantile_95"] = df.groupby("Offer_Category")["activity_score"].transform(lambda x: x.quantile(0.95))
     df["is_high_activity"] = df["activity_score"] >= df["activity_quantile_95"]
 
-    # Filter high-value targets (Must meet Top 5% Payout OR Top 5% Activity)
     top_df = df[df["is_top_5_percent"] | df["is_high_activity"]].copy()
-    print(f"[+] Total raw rows: {len(df)} | Qualified for API evaluation (Top 5% Rules): {len(top_df)}")
+    top_df["zip_code"] = top_df["zip_code"].astype(str).str.zfill(5)
 
-    # --- STEP 2: GOOGLE ADS API CPC EXTRACTION ---
+    print(f"[+] Total raw rows: {len(df)} | Qualified Top 5% ZIP targets: {len(top_df)}")
+
+    # --- 2. MAP ZIP TO GOOGLE CRITERIA IDS ---
+    zip_map = build_zip_to_criteria_id_map(top_df["zip_code"].unique())
+    top_df["geo_criteria_id"] = top_df["zip_code"].map(zip_map).fillna("2840")
+
+    # --- 3. FETCH ZIP-LEVEL GOOGLE ADS API METRICS ---
     gads_client = get_gads_client()
     customer_id = os.environ.get("GADS_LOGIN_CUSTOMER_ID")
 
-    api_results = {}
-    unique_categories = top_df["Offer_Category"].unique()
-    print(f"[+] Querying Google Ads API for {len(unique_categories)} offer categories...")
-
-    for cat in unique_categories:
+    api_results = []
+    print(f"[+] Fetching hyper-local Google Ads metrics per ZIP code...")
+    
+    for idx, row in top_df.iterrows():
+        cat = row["Offer_Category"]
+        cid = row["geo_criteria_id"]
         seeds = CATEGORY_SEED_KEYWORDS.get(cat, ["services near me", f"{cat.lower()} contractor"])
-        low, mid, high = fetch_cpc_for_category(gads_client, customer_id, seeds)
-        api_results[cat] = {"low": low, "mid": mid, "high": high}
-        print(f"    -> Category: {cat:20s} | Low CPC: ${low:6.2f} | Mid CPC: ${mid:6.2f} \vert{} High CPC:${high:6.2f}")
+        
+        metrics = fetch_zip_level_gads_data(gads_client, customer_id, cid, seeds)
+        api_results.append(metrics)
 
-    top_df["api_cpc_low"] = top_df["Offer_Category"].map(lambda c: api_results.get(c, {}).get("low", 0.0))
-    top_df["api_cpc_mid"] = top_df["Offer_Category"].map(lambda c: api_results.get(c, {}).get("mid", 0.0))
-    top_df["api_cpc_high"] = top_df["Offer_Category"].map(lambda c: api_results.get(c, {}).get("high", 0.0))
+    res_df = pd.DataFrame(api_results)
+    for col in res_df.columns:
+        top_df[col] = res_df[col].values
 
-    # --- STEP 3: BENCHMARK & VIABILITY MATH ---
-    # Benchmark Rule 1: 12x Rule Limit (Max Allowed CPC = Marketcall Payout / 12)
+    # --- 4. BENCHMARK CALCULATIONS & EXPLICIT REASONING ---
+    # 12x Rule Limits
     top_df["limit_12x_cpc"] = (top_df["Average_Bid"] / 12.0).round(2)
     top_df["status_12x_low"] = np.where(top_df["api_cpc_low"] <= top_df["limit_12x_cpc"], "PASS", "FAIL")
     top_df["status_12x_mid"] = np.where(top_df["api_cpc_mid"] <= top_df["limit_12x_cpc"], "PASS", "FAIL")
     top_df["status_12x_high"] = np.where(top_df["api_cpc_high"] <= top_df["limit_12x_cpc"], "PASS", "FAIL")
 
-    # Benchmark Rule 2: 2.24% Conversion Funnel Math
-    # Breakeven CPC = Payout * 2.24% | Target (30% Margin) CPC = Payout * 1.568%
+    # 2.24% Funnel Math (Breakeven & Target 30% Margin)
     top_df["breakeven_funnel_cpc"] = (top_df["Average_Bid"] * 0.0224).round(2)
     top_df["target_30margin_funnel_cpc"] = (top_df["Average_Bid"] * 0.01568).round(2)
     top_df["status_funnel_low"] = np.where(top_df["api_cpc_low"] <= top_df["target_30margin_funnel_cpc"], "PASS", "FAIL")
     top_df["status_funnel_mid"] = np.where(top_df["api_cpc_mid"] <= top_df["target_30margin_funnel_cpc"], "PASS", "FAIL")
     top_df["status_funnel_high"] = np.where(top_df["api_cpc_high"] <= top_df["target_30margin_funnel_cpc"], "PASS", "FAIL")
 
-    # Final Viability Tier Classification
+    # Clear Decision Tier and Reason Assignment
     conditions = [
+        # Filter 1: Zero Demand
+        top_df["avg_monthly_searches"] == 0,
+        # Filter 2: Fully Profitable (Validated at High Bid)
         (top_df["status_12x_high"] == "PASS") & (top_df["status_funnel_high"] == "PASS"),
+        # Filter 3: Marginal Profitability (Low or Mid Bid Only)
         (top_df["status_12x_low"] == "PASS") | (top_df["status_funnel_low"] == "PASS")
     ]
-    choices = ["Profitable (High Bid Validated)", "Marginal (Low/Mid Bid Only)"]
-    top_df["ZIP_Viability_Tier"] = np.select(conditions, choices, default="Non-Viable (Exclude ZIP)")
+    
+    tier_choices = [
+        "Non-Viable (Exclude ZIP)",
+        "Profitable (High Bid Validated)",
+        "Marginal (Low/Mid Bid Only)"
+    ]
+    
+    reason_choices = [
+        "REASON: NO_SEARCH_DEMAND (High payout but zero monthly search volume in Google)",
+        "REASON: HIGH_BID_VALIDATED_PROFITABLE (Passes 12x limit & 30% margin target on high CPC)",
+        "REASON: LOW_BID_ONLY_PROFITABLE (Profitable on Low/Mid bid, but High CPC exceeds margin)"
+    ]
+    
+    top_df["ZIP_Viability_Tier"] = np.select(conditions, tier_choices, default="Non-Viable (Exclude ZIP)")
+    top_df["Viability_Reason"] = np.select(conditions, reason_choices, default="REASON: CPC_EXCEEDS_12X_AND_FUNNEL (Live CPCs exceed both 12x limit and funnel margin)")
 
-    # Ensure zip_code is formatted as string for schema consistency
-    top_df["zip_code"] = top_df["zip_code"].astype(str)
-
-    # Remove temporary calculation columns
     output_df = top_df.drop(columns=["payout_quantile_95", "activity_score", "activity_quantile_95"], errors="ignore")
 
-    # --- STEP 4: BIGQUERY APPEND ---
-    print(f"[+] Writing {len(output_df)} evaluated rows to BigQuery: {EVALUATED_TABLE}...")
+    # --- 5. APPEND TO BIGQUERY ---
+    print(f"[+] Streaming {len(output_df)} ZIP-evaluated rows to BigQuery: {EVALUATED_TABLE}...")
     job_config = bigquery.LoadJobConfig(
         write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
         time_partitioning=bigquery.TimePartitioning(field="Scraped_Date")
     )
     job = bq_client.load_table_from_dataframe(output_df, EVALUATED_TABLE, job_config=job_config)
-    job.result()  # Wait for job completion
-    print(f"[✓] Successfully processed and stored date: {target_date}")
+    job.result()
+    print(f"[✓] Successfully finished ZIP analysis for date: {target_date}")
 
 if __name__ == "__main__":
     process_daily_cpc_analysis()
