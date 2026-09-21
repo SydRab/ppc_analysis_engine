@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import pandas as pd
 import numpy as np
 from datetime import date
@@ -52,48 +53,53 @@ def get_gads_client():
 def build_zip_to_criteria_id_map(gads_client, customer_id, target_zips):
     """
     Uses Google Ads API GeoTargetConstantService to dynamically look up 
-    Criteria IDs for 5-digit US Postal Codes.
+    Criteria IDs for 5-digit US Postal Codes with safe batching & error recovery.
     """
     print(f"[+] Looking up Criteria IDs for {len(target_zips)} ZIP codes via Google Ads API...")
     gtc_service = gads_client.get_service("GeoTargetConstantService")
     
     mapping = {}
-    batch_size = 25
+    batch_size = 50  # Optimized batch size for location lookup
     target_zips_padded = [str(z).zfill(5) for z in target_zips]
     
     for i in range(0, len(target_zips_padded), batch_size):
         batch = target_zips_padded[i:i + batch_size]
-        try:
-            request = gads_client.get_type("SuggestGeoTargetConstantsRequest")
-            request.locale = "en"
-            request.country_code = "US"
-            request.location_names.names.extend(batch)
-            
-            response = gtc_service.suggest_geo_target_constants(request=request)
-            for suggestion in response.geo_target_constant_suggestions:
-                gtc = suggestion.geo_target_constant
-                if gtc.target_type == "Postal Code" and gtc.country_code == "US":
-                    # Extract numeric ID from 'geoTargetConstants/1014221'
-                    cid = gtc.resource_name.split("/")[-1]
-                    mapping[gtc.name] = cid
-        except Exception as e:
-            print(f"    [!] Warning: Failed batch geo lookup ({e})")
+        retries = 3
+        success = False
+        
+        while retries > 0 and not success:
+            try:
+                request = gads_client.get_type("SuggestGeoTargetConstantsRequest")
+                request.locale = "en"
+                request.country_code = "US"
+                request.location_names.names.extend(batch)
+                
+                response = gtc_service.suggest_geo_target_constants(request=request)
+                for suggestion in response.geo_target_constant_suggestions:
+                    gtc = suggestion.geo_target_constant
+                    if gtc.target_type == "Postal Code" and gtc.country_code == "US":
+                        cid = gtc.resource_name.split("/")[-1]
+                        mapping[gtc.name] = cid
+                success = True
+                time.sleep(0.5)  # Brief pause between geo batches
+            except Exception as e:
+                retries -= 1
+                print(f"    [!] Warning: Geo batch lookup failed ({e}), retries left: {retries}")
+                time.sleep(1.5)
             
     print(f"[✓] Successfully mapped {len(mapping)} / {len(target_zips)} unique ZIP codes to Google Criteria IDs.")
     return mapping
 
 def fetch_zip_level_gads_data(gads_client, customer_id, criteria_id, seed_keywords):
     """
-    Queries KeywordPlanIdeaService targeted specifically at a ZIP Criteria ID.
-    Returns Low, Mid, High CPCs, Monthly Search Volume, and Competition Index.
+    Queries KeywordPlanIdeaService targeted specifically at a ZIP Criteria ID 
+    with rate limiting (1 QPS compliance) and automatic retry backoff.
     """
     geo_service = gads_client.get_service("GeoTargetConstantService")
     gtc_service = gads_client.get_service("KeywordPlanIdeaService")
     
     request = gads_client.get_type("GenerateKeywordIdeasRequest")
     request.customer_id = customer_id
-    
-    # Direct string resource path (Fixes: LanguageConstantService deprecation error in v25)
     request.language = "languageConstants/1000"  # English
     
     target_geo = criteria_id if criteria_id else "2840"
@@ -105,22 +111,32 @@ def fetch_zip_level_gads_data(gads_client, customer_id, criteria_id, seed_keywor
     low_bids, high_bids = [], []
     monthly_searches, comp_indexes, comp_levels = [], [], []
 
-    try:
-        response = gtc_service.generate_keyword_ideas(request=request)
-        for result in response:
-            m = result.keyword_idea_metrics
-            if m.low_top_of_page_bid_micros:
-                low_bids.append(m.low_top_of_page_bid_micros / 1_000_000)
-            if m.high_top_of_page_bid_micros:
-                high_bids.append(m.high_top_of_page_bid_micros / 1_000_000)
-            if m.avg_monthly_searches:
-                monthly_searches.append(m.avg_monthly_searches)
-            if m.competition_index:
-                comp_indexes.append(m.competition_index)
-            if m.competition:
-                comp_levels.append(m.competition.name)
-    except GoogleAdsException as ex:
-        print(f"    [!] API Exception for Criteria ID {criteria_id}: {ex}")
+    retries = 3
+    success = False
+
+    while retries > 0 and not success:
+        try:
+            response = gtc_service.generate_keyword_ideas(request=request)
+            for result in response:
+                m = result.keyword_idea_metrics
+                if m.low_top_of_page_bid_micros:
+                    low_bids.append(m.low_top_of_page_bid_micros / 1_000_000)
+                if m.high_top_of_page_bid_micros:
+                    high_bids.append(m.high_top_of_page_bid_micros / 1_000_000)
+                if m.avg_monthly_searches:
+                    monthly_searches.append(m.avg_monthly_searches)
+                if m.competition_index:
+                    comp_indexes.append(m.competition_index)
+                if m.competition:
+                    comp_levels.append(m.competition.name)
+            success = True
+        except GoogleAdsException as ex:
+            retries -= 1
+            print(f"    [!] API Exception for Criteria ID {criteria_id} (Retries left: {retries}): {ex}")
+            time.sleep(2.0)  # Backoff wait on transient failure
+
+    # Strict 1.1 second delay to ensure compliance with Google's 1 QPS plan service limit
+    time.sleep(1.1)
 
     avg_low = float(np.mean(low_bids)) if low_bids else 0.0
     avg_high = float(np.mean(high_bids)) if high_bids else 0.0
@@ -175,7 +191,7 @@ def process_daily_cpc_analysis(target_date=None):
 
     # --- 3. FETCH ZIP-LEVEL GOOGLE ADS API METRICS ---
     api_results = []
-    print(f"[+] Fetching hyper-local Google Ads metrics per ZIP code...")
+    print(f"[+] Fetching hyper-local Google Ads metrics per ZIP code with 1 QPS rate limiting...")
     
     for idx, row in top_df.iterrows():
         cat = row["Offer_Category"]
@@ -190,26 +206,20 @@ def process_daily_cpc_analysis(target_date=None):
         top_df[col] = res_df[col].values
 
     # --- 4. BENCHMARK CALCULATIONS & EXPLICIT REASONING ---
-    # 12x Rule Limits
     top_df["limit_12x_cpc"] = (top_df["Average_Bid"] / 12.0).round(2)
     top_df["status_12x_low"] = np.where(top_df["api_cpc_low"] <= top_df["limit_12x_cpc"], "PASS", "FAIL")
     top_df["status_12x_mid"] = np.where(top_df["api_cpc_mid"] <= top_df["limit_12x_cpc"], "PASS", "FAIL")
     top_df["status_12x_high"] = np.where(top_df["api_cpc_high"] <= top_df["limit_12x_cpc"], "PASS", "FAIL")
 
-    # 2.24% Funnel Math (Breakeven & Target 30% Margin)
     top_df["breakeven_funnel_cpc"] = (top_df["Average_Bid"] * 0.0224).round(2)
     top_df["target_30margin_funnel_cpc"] = (top_df["Average_Bid"] * 0.01568).round(2)
     top_df["status_funnel_low"] = np.where(top_df["api_cpc_low"] <= top_df["target_30margin_funnel_cpc"], "PASS", "FAIL")
     top_df["status_funnel_mid"] = np.where(top_df["api_cpc_mid"] <= top_df["target_30margin_funnel_cpc"], "PASS", "FAIL")
     top_df["status_funnel_high"] = np.where(top_df["api_cpc_high"] <= top_df["target_30margin_funnel_cpc"], "PASS", "FAIL")
 
-    # Clear Decision Tier and Reason Assignment
     conditions = [
-        # Filter 1: Zero Demand
         top_df["avg_monthly_searches"] == 0,
-        # Filter 2: Fully Profitable (Validated at High Bid)
         (top_df["status_12x_high"] == "PASS") & (top_df["status_funnel_high"] == "PASS"),
-        # Filter 3: Marginal Profitability (Low or Mid Bid Only)
         (top_df["status_12x_low"] == "PASS") | (top_df["status_funnel_low"] == "PASS")
     ]
     
