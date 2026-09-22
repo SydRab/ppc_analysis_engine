@@ -14,6 +14,9 @@ BQ_DATASET = "github_ppc_marketcall_db"
 RAW_TABLE = f"{GCP_PROJECT}.{BQ_DATASET}.daily_scraped_data"
 EVALUATED_TABLE = f"{GCP_PROJECT}.{BQ_DATASET}.evaluated_top_5pc_zips"
 
+# Currency Conversion Factor (USD Payout to INR CPC Account Baseline)
+USD_TO_INR_RATE = 95.74
+
 # Seed keywords per offer category
 CATEGORY_SEED_KEYWORDS = {
     "Pest Control": ["pest control near me", "exterminator service", "termite control"],
@@ -152,14 +155,16 @@ def process_daily_cpc_analysis(target_date=None):
     for col in ["api_cpc_low", "api_cpc_mid", "api_cpc_high", "avg_monthly_searches", "competition_index", "competition_level"]:
         top_df[col] = top_df["Offer_Category"].map(lambda c: category_cache.get(c, {}).get(col, 0))
 
-    # --- 3. BENCHMARK CALCULATIONS & BUSINESS LOGIC ---
-    top_df["limit_12x_cpc"] = (top_df["Average_Bid"] / 12.0).round(2)
+    # --- 3. BENCHMARK CALCULATIONS & BUSINESS LOGIC (WITH CURRENCY CONVERSION) ---
+    effective_payout_inr = top_df["Average_Bid"] * USD_TO_INR_RATE
+
+    top_df["limit_12x_cpc"] = (effective_payout_inr / 12.0).round(2)
     top_df["status_12x_low"] = np.where(top_df["api_cpc_low"] <= top_df["limit_12x_cpc"], "PASS", "FAIL")
     top_df["status_12x_mid"] = np.where(top_df["api_cpc_mid"] <= top_df["limit_12x_cpc"], "PASS", "FAIL")
     top_df["status_12x_high"] = np.where(top_df["api_cpc_high"] <= top_df["limit_12x_cpc"], "PASS", "FAIL")
 
-    top_df["breakeven_funnel_cpc"] = (top_df["Average_Bid"] * 0.0224).round(2)
-    top_df["target_30margin_funnel_cpc"] = (top_df["Average_Bid"] * 0.01568).round(2)
+    top_df["breakeven_funnel_cpc"] = (effective_payout_inr * 0.0224).round(2)
+    top_df["target_30margin_funnel_cpc"] = (effective_payout_inr * 0.01568).round(2)
     top_df["status_funnel_low"] = np.where(top_df["api_cpc_low"] <= top_df["target_30margin_funnel_cpc"], "PASS", "FAIL")
     top_df["status_funnel_mid"] = np.where(top_df["api_cpc_mid"] <= top_df["target_30margin_funnel_cpc"], "PASS", "FAIL")
     top_df["status_funnel_high"] = np.where(top_df["api_cpc_high"] <= top_df["target_30margin_funnel_cpc"], "PASS", "FAIL")
