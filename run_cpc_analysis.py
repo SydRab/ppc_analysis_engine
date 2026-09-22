@@ -4,6 +4,7 @@ import time
 import pandas as pd
 import numpy as np
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from google.cloud import bigquery
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
@@ -52,14 +53,13 @@ def get_gads_client():
 
 def build_zip_to_criteria_id_map(gads_client, customer_id, target_zips):
     """
-    Uses Google Ads API GeoTargetConstantService to dynamically look up 
-    Criteria IDs for 5-digit US Postal Codes, strictly respecting Google's 25-item batch limit.
+    Batch looks up Criteria IDs for 5-digit US Postal Codes using Google's 25-item limit.
     """
     print(f"[+] Looking up Criteria IDs for {len(target_zips)} ZIP codes via Google Ads API...")
     gtc_service = gads_client.get_service("GeoTargetConstantService")
     
     mapping = {}
-    batch_size = 25  # STRICT GOOGLE LIMIT: Maximum 25 location names per request
+    batch_size = 25  # Strict Google API batch limit
     target_zips_padded = [str(z).zfill(5) for z in target_zips]
     
     for i in range(0, len(target_zips_padded), batch_size):
@@ -81,20 +81,21 @@ def build_zip_to_criteria_id_map(gads_client, customer_id, target_zips):
                         cid = gtc.resource_name.split("/")[-1]
                         mapping[gtc.name] = cid
                 success = True
-                time.sleep(0.4)  # Brief pause between geo batches
+                time.sleep(0.3)
             except Exception as e:
                 retries -= 1
                 print(f"    [!] Warning: Geo batch lookup failed ({e}), retries left: {retries}")
-                time.sleep(1.5)
+                time.sleep(1.0)
             
     print(f"[✓] Successfully mapped {len(mapping)} / {len(target_zips)} unique ZIP codes to Google Criteria IDs.")
     return mapping
 
-def fetch_zip_level_gads_data(gads_client, customer_id, criteria_id, seed_keywords):
+def fetch_single_zip_metrics(args):
     """
-    Queries KeywordPlanIdeaService targeted specifically at a ZIP Criteria ID 
-    with rate limiting (1 QPS compliance) and automatic retry backoff.
+    Worker task to fetch metrics for a single ZIP code via ThreadPoolExecutor.
     """
+    customer_id, criteria_id, seed_keywords = args
+    gads_client = get_gads_client()
     geo_service = gads_client.get_service("GeoTargetConstantService")
     gtc_service = gads_client.get_service("KeywordPlanIdeaService")
     
@@ -130,13 +131,9 @@ def fetch_zip_level_gads_data(gads_client, customer_id, criteria_id, seed_keywor
                 if m.competition:
                     comp_levels.append(m.competition.name)
             success = True
-        except GoogleAdsException as ex:
+        except GoogleAdsException:
             retries -= 1
-            print(f"    [!] API Exception for Criteria ID {criteria_id} (Retries left: {retries}): {ex}")
-            time.sleep(2.0)  # Backoff wait on transient failure
-
-    # Strict 1.1 second delay to ensure compliance with Google's 1 QPS plan service limit
-    time.sleep(1.1)
+            time.sleep(1.5)
 
     avg_low = float(np.mean(low_bids)) if low_bids else 0.0
     avg_high = float(np.mean(high_bids)) if high_bids else 0.0
@@ -169,18 +166,22 @@ def process_daily_cpc_analysis(target_date=None):
 
     df.columns = [c.replace(" ", "_").replace(",", "_") for c in df.columns]
 
-    # --- 1. DUAL TOP 5% QUANTILE FILTERING ---
-    df["payout_quantile_95"] = df.groupby("Offer_Category")["Average_Bid"].transform(lambda x: x.quantile(0.95))
-    df["is_top_5_percent"] = df["Average_Bid"] >= df["payout_quantile_95"]
+    # --- 1. STRICTER FILTERING (TOP 1% HIGH-INTENT ZIPS) ---
+    df["payout_quantile_99"] = df.groupby("Offer_Category")["Average_Bid"].transform(lambda x: x.quantile(0.99))
+    df["is_top_1_percent"] = df["Average_Bid"] >= df["payout_quantile_99"]
 
     df["activity_score"] = df["Average_Bid"] * df["Number_of_bids"]
-    df["activity_quantile_95"] = df.groupby("Offer_Category")["activity_score"].transform(lambda x: x.quantile(0.95))
-    df["is_high_activity"] = df["activity_score"] >= df["activity_quantile_95"]
+    df["activity_quantile_99"] = df.groupby("Offer_Category")["activity_score"].transform(lambda x: x.quantile(0.99))
+    df["is_high_activity"] = df["activity_score"] >= df["activity_quantile_99"]
 
-    top_df = df[df["is_top_5_percent"] | df["is_high_activity"]].copy()
+    top_df = df[df["is_top_1_percent"] | df["is_high_activity"]].copy()
     top_df["zip_code"] = top_df["zip_code"].astype(str).str.zfill(5)
 
-    print(f"[+] Total raw rows: {len(df)} | Qualified Top 5% ZIP targets: {len(top_df)}")
+    print(f"[+] Total raw rows: {len(df)} | Filtered Top 1% High-Intent ZIP targets: {len(top_df)}")
+
+    if top_df.empty:
+        print("[!] No records met the Top 1% threshold.")
+        return
 
     # --- 2. MAP ZIP TO GOOGLE CRITERIA IDS ---
     gads_client = get_gads_client()
@@ -189,23 +190,45 @@ def process_daily_cpc_analysis(target_date=None):
     zip_map = build_zip_to_criteria_id_map(gads_client, customer_id, top_df["zip_code"].unique())
     top_df["geo_criteria_id"] = top_df["zip_code"].map(zip_map).fillna("2840")
 
-    # --- 3. FETCH ZIP-LEVEL GOOGLE ADS API METRICS ---
-    api_results = []
-    print(f"[+] Fetching hyper-local Google Ads metrics per ZIP code with 1 QPS rate limiting...")
+    # --- 3. CONCURRENT WORKER POOL WITH FREQUENT PROGRESS LOGGING ---
+    print(f"[+] Executing concurrent API worker pool (max_workers=4)...")
     
+    tasks = []
     for idx, row in top_df.iterrows():
         cat = row["Offer_Category"]
         cid = row["geo_criteria_id"]
         seeds = CATEGORY_SEED_KEYWORDS.get(cat, ["services near me", f"{cat.lower()} contractor"])
-        
-        metrics = fetch_zip_level_gads_data(gads_client, customer_id, cid, seeds)
-        api_results.append(metrics)
+        tasks.append((customer_id, cid, seeds))
 
-    res_df = pd.DataFrame(api_results)
+    total_tasks = len(tasks)
+    ordered_results = [None] * total_tasks
+    
+    # Using ThreadPoolExecutor with live progress tracking
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_index = {executor.submit(fetch_single_zip_metrics, tasks[i]): i for i in range(total_tasks)}
+        
+        completed_count = 0
+        for future in as_completed(future_to_index):
+            idx = future_to_index[future]
+            completed_count += 1
+            try:
+                ordered_results[idx] = future.result()
+            except Exception:
+                ordered_results[idx] = {
+                    "api_cpc_low": 0.0, "api_cpc_mid": 0.0, "api_cpc_high": 0.0,
+                    "avg_monthly_searches": 0, "competition_index": 0, "competition_level": "UNKNOWN"
+                }
+            
+            # Print frequent progress status updates every 25 completed items
+            if completed_count % 25 == 0 or completed_count == total_tasks:
+                pct = (completed_count / total_tasks) * 100
+                print(f"[Progress] Completed {completed_count}/{total_tasks} targets ({pct:.1f}%)")
+
+    res_df = pd.DataFrame(ordered_results)
     for col in res_df.columns:
         top_df[col] = res_df[col].values
 
-    # --- 4. BENCHMARK CALCULATIONS & EXPLICIT REASONING ---
+    # --- 4. BENCHMARK CALCULATIONS & BUSINESS LOGIC ---
     top_df["limit_12x_cpc"] = (top_df["Average_Bid"] / 12.0).round(2)
     top_df["status_12x_low"] = np.where(top_df["api_cpc_low"] <= top_df["limit_12x_cpc"], "PASS", "FAIL")
     top_df["status_12x_mid"] = np.where(top_df["api_cpc_mid"] <= top_df["limit_12x_cpc"], "PASS", "FAIL")
@@ -238,17 +261,17 @@ def process_daily_cpc_analysis(target_date=None):
     top_df["ZIP_Viability_Tier"] = np.select(conditions, tier_choices, default="Non-Viable (Exclude ZIP)")
     top_df["Viability_Reason"] = np.select(conditions, reason_choices, default="REASON: CPC_EXCEEDS_12X_AND_FUNNEL (Live CPCs exceed both 12x limit and funnel margin)")
 
-    output_df = top_df.drop(columns=["payout_quantile_95", "activity_score", "activity_quantile_95"], errors="ignore")
+    output_df = top_df.drop(columns=["payout_quantile_99", "activity_score", "activity_quantile_99"], errors="ignore")
 
-    # --- 5. APPEND TO BIGQUERY ---
-    print(f"[+] Streaming {len(output_df)} ZIP-evaluated rows to BigQuery: {EVALUATED_TABLE}...")
+    # --- 5. FINAL BULK STREAM TO BIGQUERY ---
+    print(f"[+] Streaming {len(output_df)} evaluated rows to BigQuery table: {EVALUATED_TABLE}...")
     job_config = bigquery.LoadJobConfig(
         write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
         time_partitioning=bigquery.TimePartitioning(field="Scraped_Date")
     )
     job = bq_client.load_table_from_dataframe(output_df, EVALUATED_TABLE, job_config=job_config)
     job.result()
-    print(f"[✓] Successfully finished ZIP analysis for date: {target_date}")
+    print(f"[✓] Successfully finished pipeline execution for date: {target_date}")
 
 if __name__ == "__main__":
     process_daily_cpc_analysis()
