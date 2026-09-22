@@ -52,8 +52,7 @@ def get_gads_client():
 
 def fetch_category_region_metrics(gads_client, customer_id, seed_keywords):
     """
-    Queries KeywordPlanIdeaService at a macro regional level (United States - 2840) 
-    once per category, eliminating thousands of redundant micro-requests.
+    Queries KeywordPlanIdeaService at a macro regional level once per category.
     """
     geo_service = gads_client.get_service("GeoTargetConstantService")
     gtc_service = gads_client.get_service("KeywordPlanIdeaService")
@@ -62,7 +61,6 @@ def fetch_category_region_metrics(gads_client, customer_id, seed_keywords):
     request.customer_id = customer_id
     request.language = "languageConstants/1000"  # English
     
-    # Target Country-level (US = 2840) to establish robust baseline CPC benchmarks per category instantly
     request.geo_target_constants.append(geo_service.geo_target_constant_path("2840"))
     request.include_adult_keywords = False
     request.keyword_plan_network = gads_client.get_type("KeywordPlanNetworkEnum").KeywordPlanNetwork.GOOGLE_SEARCH
@@ -119,28 +117,28 @@ def process_daily_cpc_analysis(target_date=None):
 
     df.columns = [c.replace(" ", "_").replace(",", "_") for c in df.columns]
 
-    # --- 1. TOP 1% QUANTILE FILTERING ---
+    # --- 1. FILTERING (MAPPED TO EXISTING TABLE SCHEMA AS is_top_5_percent) ---
     df["payout_quantile_99"] = df.groupby("Offer_Category")["Average_Bid"].transform(lambda x: x.quantile(0.99))
-    df["is_top_1_percent"] = df["Average_Bid"] >= df["payout_quantile_99"]
+    df["is_top_5_percent"] = df["Average_Bid"] >= df["payout_quantile_99"]
 
     df["activity_score"] = df["Average_Bid"] * df["Number_of_bids"]
     df["activity_quantile_99"] = df.groupby("Offer_Category")["activity_score"].transform(lambda x: x.quantile(0.99))
     df["is_high_activity"] = df["activity_score"] >= df["activity_quantile_99"]
 
-    top_df = df[df["is_top_1_percent"] | df["is_high_activity"]].copy()
+    top_df = df[df["is_top_5_percent"] | df["is_high_activity"]].copy()
     top_df["zip_code"] = top_df["zip_code"].astype(str).str.zfill(5)
 
-    print(f"[+] Total raw rows: {len(df)} | Filtered Top 1% High-Intent targets: {len(top_df)}")
+    print(f"[+] Total raw rows: {len(df)} | Filtered High-Intent targets: {len(top_df)}")
 
     if top_df.empty:
-        print("[!] No records met the Top 1% threshold.")
+        print("[!] No records met the threshold.")
         return
 
-    # --- 2. CATEGORY-LEVEL BENCHMARK CACHING (Blazing Fast Execution) ---
+    # --- 2. CATEGORY-LEVEL BENCHMARK CACHING ---
     gads_client = get_gads_client()
     customer_id = os.environ.get("GADS_LOGIN_CUSTOMER_ID")
 
-    print(f"[+] Fetching optimized category benchmark metrics (runs in seconds instead of hours)...")
+    print(f"[+] Fetching optimized category benchmark metrics...")
     category_cache = {}
     unique_categories = top_df["Offer_Category"].unique()
 
@@ -149,9 +147,8 @@ def process_daily_cpc_analysis(target_date=None):
         print(f"    -> Querying baseline CPC benchmarks for category: '{cat}'")
         metrics = fetch_category_region_metrics(gads_client, customer_id, seeds)
         category_cache[cat] = metrics
-        time.sleep(0.5)  # Clean pacing
+        time.sleep(0.5)
 
-    # Map cached category benchmarks across all top rows instantly
     for col in ["api_cpc_low", "api_cpc_mid", "api_cpc_high", "avg_monthly_searches", "competition_index", "competition_level"]:
         top_df[col] = top_df["Offer_Category"].map(lambda c: category_cache.get(c, {}).get(col, 0))
 
