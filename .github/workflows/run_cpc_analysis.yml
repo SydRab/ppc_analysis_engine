@@ -1,8 +1,8 @@
 name: Daily CPC Analysis & BigQuery Sync
 
-on:
-  schedule:
-    - cron: '30 1 * * *' # Scheduled daily run
+# on:
+#   schedule:
+#     - cron: '30 1 * * *' # Scheduled daily run
   workflow_dispatch:
     inputs:
       target_date:
