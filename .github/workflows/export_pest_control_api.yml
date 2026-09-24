@@ -36,4 +36,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pest-control-api-output
-          path: pest_control_api_raw_output.csv
+          path: pest_control_intent_filtered_output.csv
