@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y xvfb
           python -m pip install --upgrade pip
-          pip install playwright pandas google-cloud-bigquery
+          pip install playwright pandas google-cloud-bigquery pyarrow
           playwright install chromium
 
       - name: Set up GCP Credentials
