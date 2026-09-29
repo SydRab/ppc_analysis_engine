@@ -26,7 +26,7 @@ jobs:
 
       - name: Set up GCP Credentials
         run: |
-          echo "${{ secrets.GCP_SA_BQ_KEY }}" > gcp_key.json
+          echo '${{ secrets.GCP_SA_BQ_KEY }}' > gcp_key.json
 
       - name: Run Scraper in Virtual Framebuffer
         run: xvfb-run --auto-servernum python scraper.py
