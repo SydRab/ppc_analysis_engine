@@ -15,10 +15,12 @@ app = FastAPI(title="PPC Analysis MCP Server")
 
 @app.get("/")
 @app.get("/health")
+@app.get("/mcp")
 async def health_check():
     return {"status": "healthy", "service": "ppc-analysis-mcp"}
 
 @app.post("/")
+@app.post("/mcp")
 async def handle_mcp_post(request: Request):
     try:
         body = await request.json()
