@@ -11,8 +11,8 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # Install project dependencies (including google-ads and mcp SDK)
-COPY requirements-cloudrun.txt .
-RUN pip install --no-cache-dir -r requirements-cloudrun.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy repository source code
 COPY . .
