@@ -10,6 +10,7 @@ Description: Exposes an HTTP-compatible Model Context Protocol (MCP) endpoint
 import os
 import json
 import asyncio
+import socketserver
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from mcp.server import Server
 from mcp.types import Tool, TextContent
@@ -72,10 +73,19 @@ class MCPHttpHandler(BaseHTTPRequestHandler):
         }
         self.wfile.write(json.dumps(response_payload).encode("utf-8"))
 
+    def log_message(self, format, *args):
+        # Suppress verbose standard request logging to keep container logs clean
+        return
+
 def run_http_server():
     port = int(os.environ.get("PORT", 8080))
     server_address = ("0.0.0.0", port)
-    httpd = HTTPServer(server_address, MCPHttpHandler)
+    
+    # Use ThreadingHTTPServer so it handles health check pings and connections concurrently and instantly
+    class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+
+    httpd = ThreadingHTTPServer(server_address, MCPHttpHandler)
     print(f"Starting MCP HTTP server on port {port}...")
     httpd.serve_forever()
 
