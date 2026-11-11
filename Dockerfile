@@ -1,24 +1,14 @@
-# ====================================================================
-# Cloud Run Deployment Container for Claude MCP Integration
-# Repository: SydRab/ppc_analysis_engine
-# Description: Packages the Python environment and MCP server to run 
-#              as a serverless web service on Google Cloud Run, enabling 
-#              real-time AI-driven queries to your Google Ads MCC data.
-# ====================================================================
-
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install project dependencies (including google-ads and mcp SDK)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy repository source code
-COPY . .
+RUN pip install --no-cache-dir google-ads-mcp
 
-# Cloud Run web service port binding
+ENV PORT=8080
 EXPOSE 8080
 
-# Run the MCP server entry point
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "-m", "ads_mcp.server"]
