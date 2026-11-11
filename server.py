@@ -2,16 +2,25 @@
 MCP Server Bridge for Cloud Run & Claude Integration
 ---------------------------------------------------------
 Repository: SydRab/ppc_analysis_engine
-Description: Fast asynchronous FastAPI server acting as an HTTP-compatible 
-             Model Context Protocol (MCP) endpoint for Cloud Run and Claude.
+Description: Secure FastAPI MCP server requiring an API key header for Claude.
 """
 
 import os
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
 import uvicorn
 
 app = FastAPI(title="PPC Analysis MCP Server")
+security = HTTPBearer()
+
+# Set a shared secret token in your Cloud Run environment variables (e.g., CLAUDE_MCP_SECRET)
+EXPECTED_TOKEN = os.environ.get("CLAUDE_MCP_SECRET", "your-secure-default-token-here")
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
+    if credentials.credentials != EXPECTED_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid authorization token")
+    return credentials.credentials
 
 @app.get("/")
 @app.get("/health")
@@ -21,20 +30,20 @@ async def health_check():
 
 @app.post("/")
 @app.post("/mcp")
-async def handle_mcp_post(request: Request):
+async def handle_mcp_post(request: Request, token: str = Security(verify_token)):
     try:
         body = await request.json()
     except Exception:
         body = {}
         
-    # Handle incoming tool calls or queries from Claude
+    # Hook this up to your Google Ads API execution pipeline here
     response_payload = {
         "jsonrpc": "2.0",
         "result": {
             "content": [
                 {
                     "type": "text", 
-                    "text": "Successfully queried PPC keyword pipeline via Cloud Run FastAPI bridge!"
+                    "text": "Successfully authenticated and queried Google Ads MCC pipeline!"
                 }
             ]
         },
