@@ -21,4 +21,4 @@ COPY . .
 EXPOSE 8080
 
 # Run the MCP server entry point
-CMD ["python", "server.py"]
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]
