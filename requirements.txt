@@ -1,8 +1,8 @@
 playwright>=1.40.0
 beautifulsoup4>=4.12.0
 pandas>=2.0.0
-google-cloud-bigquerygoogle-ads
 google-cloud-bigquery
+google-ads
 pandas-gbq
 protobuf
 pandas
