@@ -1,6 +1,10 @@
 playwright>=1.40.0
 beautifulsoup4>=4.12.0
 pandas>=2.0.0
+google-cloud-bigquerygoogle-ads
 google-cloud-bigquery
-pip install google-ads google-cloud-bigquery pandas-gbq protobuf pandas numpy
+pandas-gbq
+protobuf
+pandas
+numpy
 mcp
