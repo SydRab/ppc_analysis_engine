@@ -9,3 +9,4 @@ google-ads
 google-cloud-bigquery
 pandas-gbq
 mcp
+google-cloud-firestore>=2.14.0
