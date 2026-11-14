@@ -2,6 +2,11 @@ name: Keyword CPC Check (on demand)
 
 on:
   workflow_dispatch:
+    inputs:
+      extra_keywords:
+        description: 'Optional comma-separated keywords to check that are not in the campaign'
+        required: false
+        default: ''
 
 jobs:
   check:
@@ -19,6 +24,7 @@ jobs:
           GADS_CLIENT_SECRET: ${{ secrets.GADS_CLIENT_SECRET }}
           GADS_REFRESH_TOKEN: ${{ secrets.GADS_REFRESH_TOKEN }}
           GADS_LOGIN_CUSTOMER_ID: ${{ secrets.GADS_LOGIN_CUSTOMER_ID }}
+          EXTRA_KEYWORDS: ${{ github.event.inputs.extra_keywords }}
         run: python keyword_cpc_check.py
       - uses: actions/upload-artifact@v4
         with:

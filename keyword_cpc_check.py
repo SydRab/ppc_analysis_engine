@@ -39,6 +39,10 @@ def main():
               AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED'""")
     })
     print(f"[+] {len(keywords)} keywords in campaign")
+    extra = [k.strip() for k in os.environ.get("EXTRA_KEYWORDS", "").split(",") if k.strip()]
+    if extra:
+        keywords = sorted(set(keywords) | set(extra))
+        print(f"[+] Plus {len(extra)} extra keywords to evaluate: {extra}")
 
     zip_ids = [r.campaign_criterion.location.geo_target_constant.split("/")[-1] for r in gaql(c, f"""
         SELECT campaign_criterion.location.geo_target_constant FROM campaign_criterion
