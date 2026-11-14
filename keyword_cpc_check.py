@@ -101,6 +101,16 @@ def main():
         print(f"    Search-weighted high top-of-page bid: ${(has.high_bid_usd * w).sum() / w.sum():.2f}")
         print(f"    Search-weighted low top-of-page bid:  ${(has.low_bid_usd * w).sum() / w.sum():.2f}")
         print(f"    Median high bid: ${has.high_bid_usd.median():.2f}")
+    vol = df.groupby("keyword").avg_monthly_searches.sum().sort_values(ascending=False)
+    print(f"\n[+] Total monthly searches, all keywords x states: {int(df.avg_monthly_searches.sum())}")
+    print(f"    Keywords with 0 searches in every state: {(vol == 0).sum()} of {len(vol)}")
+    print("    Top keywords by searches (summed over states):")
+    for k, v in vol.head(15).items():
+        print(f"      {v:>6}  {k}")
+    if len(has):
+        print("    Rows with bid data:")
+        for _, r in has.sort_values("avg_monthly_searches", ascending=False).iterrows():
+            print(f"      {r.state:<15} {r.keyword:<45} searches {r.avg_monthly_searches:>5}  low ${r.low_bid_usd:.2f}  high ${r.high_bid_usd:.2f}")
     print("[✓] Saved keyword_cpc_check.csv")
 
 
