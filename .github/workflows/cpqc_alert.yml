@@ -1,0 +1,31 @@
+name: Cost per Qualified Call Alert
+
+on:
+  schedule:
+    # Every 2 hours while ads run (5am-3pm Pacific = 13:00-23:00 UTC, Mon-Fri), plus a final check at 00:30 UTC
+    - cron: '15 13-23/2 * * 1-5'
+    - cron: '30 0 * * 2-6'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install google-ads google-cloud-bigquery
+      - name: Run CPQC check
+        env:
+          GCP_SA_KEY_JSON: ${{ secrets.GCP_SA_BQ_KEY }}
+          GADS_CLIENT_ID: ${{ secrets.GADS_CLIENT_ID }}
+          GADS_CLIENT_SECRET: ${{ secrets.GADS_CLIENT_SECRET }}
+          GADS_REFRESH_TOKEN: ${{ secrets.GADS_REFRESH_TOKEN }}
+          GADS_LOGIN_CUSTOMER_ID: ${{ secrets.GADS_LOGIN_CUSTOMER_ID }}
+          GADS_DEVELOPER_TOKEN: ${{ secrets.GADS_DEVELOPER_TOKEN }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+          CPQC_ALERT_USD: '40'
+        run: python alerts/cpqc_alert.py
