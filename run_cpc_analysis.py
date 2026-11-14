@@ -42,6 +42,13 @@ def get_bq_client():
         return bigquery.Client.from_service_account_info(info)
     return bigquery.Client(project=GCP_PROJECT)
 
+def _table_exists(client, table_id):
+    try:
+        client.get_table(table_id)
+        return True
+    except Exception:
+        return False
+
 def get_gads_client():
     credentials = {
         "developer_token": "DEVELOPER_TOKEN_NOT_REQUIRED",
@@ -73,8 +80,19 @@ def fetch_category_region_metrics(gads_client, customer_id, seed_keywords):
     monthly_searches, comp_indexes, comp_levels = [], [], []
 
     try:
-        response = gtc_service.generate_keyword_ideas(request=request)
-        for result in response:
+        response = None
+        for attempt in range(4):
+            try:
+                response = list(gtc_service.generate_keyword_ideas(request=request))
+                break
+            except Exception as ex:
+                if "RESOURCE_EXHAUSTED" in str(ex) and attempt < 3:
+                    wait = 30 * (attempt + 1)
+                    print(f"    [!] Google Ads quota hit, retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise
+        for result in response or []:
             m = result.keyword_idea_metrics
             if m.low_top_of_page_bid_micros:
                 low_bids.append(m.low_top_of_page_bid_micros / 1_000_000)
@@ -119,6 +137,7 @@ def process_daily_cpc_analysis(target_date=None):
         return
 
     df.columns = [c.replace(" ", "_").replace(",", "_") for c in df.columns]
+    df = df.drop(columns=["is_backfill"], errors="ignore")
 
     # --- 1. FILTERING (MAPPED TO EXISTING TABLE SCHEMA AS is_top_5_percent) ---
     df["payout_quantile_99"] = df.groupby("Offer_Category")["Average_Bid"].transform(lambda x: x.quantile(0.99))
@@ -194,6 +213,11 @@ def process_daily_cpc_analysis(target_date=None):
 
     # --- 4. STREAM TO BIGQUERY ---
     print(f"[+] Streaming {len(output_df)} evaluated rows to BigQuery table: {EVALUATED_TABLE}...")
+    # Remove any earlier results for this date first, so reruns replace instead of duplicating
+    if _table_exists(bq_client, EVALUATED_TABLE):
+        bq_client.query(
+            f"DELETE FROM `{EVALUATED_TABLE}` WHERE Scraped_Date = '{target_date}'"
+        ).result()
     job_config = bigquery.LoadJobConfig(
         write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
         time_partitioning=bigquery.TimePartitioning(field="Scraped_Date")

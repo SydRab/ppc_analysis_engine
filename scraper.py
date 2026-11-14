@@ -1,12 +1,11 @@
 import asyncio
 import datetime
 import os
+import sys
 import pandas as pd
 from playwright.async_api import async_playwright
-from google.cloud import bigquery
-from google.oauth2 import service_account
+import bq_scraped
 
-CSV_FILE = "marketcall_data.csv"
 KEY_PATH = "gcp_key.json"
 
 CATEGORY_URLS = {
@@ -88,49 +87,25 @@ async def main():
 
         await browser.close()
 
-    if all_dfs:
-        combined_df = pd.concat(all_dfs, ignore_index=True)
-        save_and_deduplicate(combined_df)
-        upload_to_bigquery(combined_df)
+    if not all_dfs:
+        print("\n[!] No data scraped from any category.")
+        sys.exit(1)
 
-def save_and_deduplicate(new_df):
-    if os.path.exists(CSV_FILE) and os.path.getsize(CSV_FILE) > 0:
-        try:
-            existing_df = pd.read_csv(CSV_FILE)
-            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-            data_cols = [c for c in combined_df.columns if c != "Scraped_Date"]
-            deduped_df = combined_df.drop_duplicates(subset=data_cols, keep="first")
-        except Exception:
-            deduped_df = new_df
-    else:
-        deduped_df = new_df
-
-    deduped_df.to_csv(CSV_FILE, index=False)
-    print(f"\n[✓] Master dataset updated: {len(deduped_df)} total records saved in {CSV_FILE}.")
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+    upload_to_bigquery(combined_df)
 
 def upload_to_bigquery(new_df):
     if not os.path.exists(KEY_PATH):
-        print("\n[!] GCP key file (gcp_key.json) not found. Skipping BigQuery upload.")
-        return
+        print("\n[!] GCP key file (gcp_key.json) not found. Cannot upload to BigQuery.")
+        sys.exit(1)
 
     try:
-        credentials = service_account.Credentials.from_service_account_file(KEY_PATH)
-        client = bigquery.Client(credentials=credentials, project=credentials.project_id)
-
-        # Target BigQuery table
-        table_id = f"{credentials.project_id}.github_ppc_marketcall_db.daily_scraped_data"
-
-        job_config = bigquery.LoadJobConfig(
-            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-            autodetect=True,
-            column_name_character_map="V2"  # Handles special characters in headers
-        )
-
-        job = client.load_table_from_dataframe(new_df, table_id, job_config=job_config)
-        job.result()  # Wait for upload completion
-        print(f"[✓] Successfully uploaded {len(new_df)} new rows to BigQuery table: {table_id}")
+        client = bq_scraped.get_client(KEY_PATH)
+        rows = bq_scraped.upload(client, bq_scraped.prepare(new_df))
+        print(f"[✓] Successfully uploaded {rows} rows to BigQuery table: {bq_scraped.TABLE_ID}")
     except Exception as e:
         print(f"[!] BigQuery upload failed: {e}")
+        sys.exit(1)  # fail the GitHub run so GitHub emails you
 
 if __name__ == "__main__":
     asyncio.run(main())

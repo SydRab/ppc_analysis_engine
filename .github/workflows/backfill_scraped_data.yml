@@ -1,0 +1,19 @@
+name: Backfill Scraper Data to BigQuery (one-off)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install pandas google-cloud-bigquery pyarrow db-dtypes
+      - name: Set up GCP credentials
+        run: echo '${{ secrets.GCP_SA_BQ_KEY }}' > gcp_key.json
+      - name: Run backfill
+        run: python backfill_scraped_data.py
