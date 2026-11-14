@@ -24,7 +24,6 @@ jobs:
           GADS_CLIENT_SECRET: ${{ secrets.GADS_CLIENT_SECRET }}
           GADS_REFRESH_TOKEN: ${{ secrets.GADS_REFRESH_TOKEN }}
           GADS_LOGIN_CUSTOMER_ID: ${{ secrets.GADS_LOGIN_CUSTOMER_ID }}
-          GADS_DEVELOPER_TOKEN: ${{ secrets.GADS_DEVELOPER_TOKEN }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
           CPQC_ALERT_USD: '40'

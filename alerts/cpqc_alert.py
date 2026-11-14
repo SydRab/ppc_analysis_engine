@@ -11,7 +11,7 @@ Each alert type is sent at most once per day (logged in marketcall.alert_log).
 If the Google Ads API call fails, it falls back to yesterday's final numbers from marketcall.daily_profit.
 
 Env: GCP_SA_KEY_JSON, GADS_CLIENT_ID, GADS_CLIENT_SECRET, GADS_REFRESH_TOKEN, GADS_LOGIN_CUSTOMER_ID,
-     GADS_DEVELOPER_TOKEN (optional), RESEND_API_KEY, ALERT_EMAIL_TO, CPQC_ALERT_USD (default 40)
+     RESEND_API_KEY, ALERT_EMAIL_TO, CPQC_ALERT_USD (default 40)
 """
 import json
 import os
@@ -42,7 +42,7 @@ def usd_inr(client):
 def today_spend_inr():
     from google.ads.googleads.client import GoogleAdsClient
     gads = GoogleAdsClient.load_from_dict({
-        "developer_token": os.environ.get("GADS_DEVELOPER_TOKEN") or "DEVELOPER_TOKEN_NOT_REQUIRED",
+        "developer_token": "DEVELOPER_TOKEN_NOT_REQUIRED",  # developer tokens were sunset on 9 Sep 2026; Google ignores this value
         "client_id": os.environ["GADS_CLIENT_ID"],
         "client_secret": os.environ["GADS_CLIENT_SECRET"],
         "refresh_token": os.environ["GADS_REFRESH_TOKEN"],
